@@ -1,0 +1,21 @@
+{
+  "short_name": "CampusPro",
+  "name": "CampusPro Portal",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "/icon.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#0b3b60",
+  "theme_color": "#0b3b60",
+  "display": "standalone",
+  "orientation": "portrait"
+}
