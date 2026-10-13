@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { db, auth } from "../../firebase";
-import { ref, get, push, set, query, orderByChild, equalTo, update, child, remove } from "firebase/database";
+import { ref, get, push, set, query, orderByChild, equalTo, update, child, remove, runTransaction } from "firebase/database";
 import { signOut, onAuthStateChanged } from "firebase/auth";
 import { useNavigate } from "react-router-dom";
 import NotificationBell from "../NotificationBell";
@@ -34,6 +34,9 @@ export default function HODDashboard() {
   const [myDepartment, setMyDepartment] = useState("");
   const [selectedClassesForDept, setSelectedClassesForDept] = useState([]);
   
+  // NEW: Update Existing Semester Selection
+  const [updateSemesterId, setUpdateSemesterId] = useState("new");
+
   // Notice States
   const [noticeTitle, setNoticeTitle] = useState("");
   const [noticeMessage, setNoticeMessage] = useState("");
@@ -155,40 +158,47 @@ export default function HODDashboard() {
     } else setSelectedStudents([]);
   };
 
-  // FIXED: Auto-Update & Merge Existing Semesters
+  // MULTI-USER SAFE: Semester Creation & Upserting via Transactions
   const handleCreateSemester = async (e) => {
     e.preventDefault();
     if (selectedStudents.length === 0) return alert("Select at least one student.");
     
-    const existingSem = semesters.find(s => s.name.toLowerCase().trim() === semName.toLowerCase().trim());
+    const existingSem = (updateSemesterId !== "new") 
+      ? semesters.find(s => s.id === updateSemesterId)
+      : semesters.find(s => s.name.toLowerCase().trim() === semName.toLowerCase().trim());
     
-    if (existingSem) {
-       let existingSet = new Set();
-       if (existingSem.studentIds) {
-          if (Array.isArray(existingSem.studentIds)) {
-             existingSem.studentIds.forEach(id => existingSet.add(id));
-          } else {
-             Object.entries(existingSem.studentIds).forEach(([k, v]) => {
-                if (typeof v === "string") existingSet.add(v);
-                else if (v === true) existingSet.add(k);
-             });
-          }
-       }
-       selectedStudents.forEach(id => existingSet.add(id));
-       const mergedIds = Array.from(existingSet);
-       
-       await update(ref(db, `semesters/${existingSem.id}`), { studentIds: mergedIds });
-       alert(`Updated '${existingSem.name}'! Total students in this semester is now ${mergedIds.length}.`);
-    } else {
-       await set(push(ref(db, "semesters")), { name: semName.trim(), studentIds: selectedStudents, collegeCode: myCollegeCode });
-       alert("Semester Created successfully!");
+    try {
+      if (existingSem) {
+         const studentIdsRef = ref(db, `semesters/${existingSem.id}/studentIds`);
+         await runTransaction(studentIdsRef, (currentData) => {
+             let existingSet = new Set();
+             if (currentData) {
+                 if (Array.isArray(currentData)) {
+                     currentData.forEach(id => existingSet.add(id));
+                 } else {
+                     Object.entries(currentData).forEach(([k, v]) => {
+                         if (typeof v === "string") existingSet.add(v);
+                         else if (v === true) existingSet.add(k);
+                     });
+                 }
+             }
+             selectedStudents.forEach(id => existingSet.add(id));
+             return Array.from(existingSet); 
+         });
+         alert(`Updated '${existingSem.name}'! Successfully added new students without duplicates.`);
+      } else {
+         if(!semName.trim()) return alert("Please enter a new semester name.");
+         await set(push(ref(db, "semesters")), { name: semName.trim(), studentIds: selectedStudents, collegeCode: myCollegeCode });
+         alert("New Semester Created successfully!");
+      }
+      
+      setSemName(""); setSelectedStudents([]); setImportSemesterId(""); setUpdateSemesterId("new"); setFormStudentSearch("");
+      fetchAllIsolatedData(myCollegeCode); 
+    } catch(err) {
+      alert("Transaction failed. Please try again.");
     }
-    
-    setSemName(""); setSelectedStudents([]); setImportSemesterId(""); setFormStudentSearch("");
-    fetchAllIsolatedData(myCollegeCode); 
   };
 
-  // FIXED: Auto-Update & Merge Existing Classes
   const handleCreateClass = async (e) => {
     e.preventDefault();
     if (selectedSemesters.length === 0) return alert("Select at least one semester.");
@@ -196,25 +206,30 @@ export default function HODDashboard() {
     
     const existingClass = classes.find(c => c.name.toLowerCase().trim() === className.toLowerCase().trim());
     
-    if (existingClass) {
-       let existingSemSet = new Set();
-       if (existingClass.semesterIds) {
-           if (Array.isArray(existingClass.semesterIds)) existingClass.semesterIds.forEach(id => existingSemSet.add(id));
-           else Object.values(existingClass.semesterIds).forEach(id => existingSemSet.add(id));
-       }
-       selectedSemesters.forEach(id => existingSemSet.add(id));
-       
-       await update(ref(db, `classes/${existingClass.id}`), {
-          semesterIds: Array.from(existingSemSet),
-          inchargeId: selectedIncharge 
-       });
-       alert(`Updated Class '${existingClass.name}' with new semesters and/or incharge!`);
-    } else {
-       await set(push(ref(db, "classes")), { name: className.trim(), semesterIds: selectedSemesters, inchargeId: selectedIncharge, collegeCode: myCollegeCode });
-       alert("Class Created successfully!");
+    try {
+      if (existingClass) {
+         const semIdsRef = ref(db, `classes/${existingClass.id}/semesterIds`);
+         await runTransaction(semIdsRef, (currentData) => {
+             let existingSemSet = new Set();
+             if (currentData) {
+                 if (Array.isArray(currentData)) currentData.forEach(id => existingSemSet.add(id));
+                 else Object.values(currentData).forEach(id => existingSemSet.add(id));
+             }
+             selectedSemesters.forEach(id => existingSemSet.add(id));
+             return Array.from(existingSemSet);
+         });
+         
+         await update(ref(db, `classes/${existingClass.id}`), { inchargeId: selectedIncharge });
+         alert(`Updated Class '${existingClass.name}' safely!`);
+      } else {
+         await set(push(ref(db, "classes")), { name: className.trim(), semesterIds: selectedSemesters, inchargeId: selectedIncharge, collegeCode: myCollegeCode });
+         alert("Class Created successfully!");
+      }
+      setClassName(""); setSelectedSemesters([]); setSelectedIncharge(""); setInchargeSearchTerm("");
+      fetchAllIsolatedData(myCollegeCode); 
+    } catch(err) {
+      alert("Transaction failed. Please try again.");
     }
-    setClassName(""); setSelectedSemesters([]); setSelectedIncharge(""); setInchargeSearchTerm("");
-    fetchAllIsolatedData(myCollegeCode); 
   };
 
   const handleCreateSubject = async (e) => {
@@ -279,26 +294,45 @@ export default function HODDashboard() {
     const teacherData = teachers.find(t => t.id === newLecture.teacherId);
     const lectureWithTeacher = { ...newLecture, teacherName: teacherData ? teacherData.name : "Unknown" };
     
-    const currentDayLectures = timetable[selectedDay] || [];
-    const updatedDay = [...currentDayLectures, lectureWithTeacher];
-    const updatedTimetable = { ...timetable, [selectedDay]: updatedDay };
-    
     try {
-      await update(ref(db, `classes/${timetableClass.id}/timetables/${timetableSemester}`), updatedTimetable);
-      setTimetable(updatedTimetable); 
-      setTimetableClass(prev => ({ ...prev, timetables: { ...(prev.timetables || {}), [timetableSemester]: updatedTimetable } }));
+      const dayRef = ref(db, `classes/${timetableClass.id}/timetables/${timetableSemester}/${selectedDay}`);
+      
+      await runTransaction(dayRef, (currentLectures) => {
+          const lectures = currentLectures || [];
+          const existingIndex = lectures.findIndex(l => l.lecNumber === lectureWithTeacher.lecNumber);
+          
+          if (existingIndex >= 0) {
+              lectures[existingIndex] = lectureWithTeacher; 
+          } else {
+              lectures.push(lectureWithTeacher); 
+          }
+          return lectures;
+      });
+      
+      const updatedClassSnap = await get(ref(db, `classes/${timetableClass.id}`));
+      if(updatedClassSnap.exists()) {
+         const tt = updatedClassSnap.val().timetables?.[timetableSemester] || {};
+         setTimetable(tt);
+      }
+      
       setNewLecture({ ...newLecture, lecNumber: "", startTime: "", endTime: "", subject: "", teacherId: "" });
       setTimetableFacultySearch(""); 
     } catch(err) { alert("Failed to save lecture."); }
   };
 
   const handleRemoveLecture = async (day, index) => {
-    const updatedDay = timetable[day].filter((_, i) => i !== index);
-    const updatedTimetable = { ...timetable, [day]: updatedDay };
     try {
-      await update(ref(db, `classes/${timetableClass.id}/timetables/${timetableSemester}`), updatedTimetable);
-      setTimetable(updatedTimetable);
-      setTimetableClass(prev => ({ ...prev, timetables: { ...(prev.timetables || {}), [timetableSemester]: updatedTimetable } }));
+      const dayRef = ref(db, `classes/${timetableClass.id}/timetables/${timetableSemester}/${day}`);
+      await runTransaction(dayRef, (currentLectures) => {
+          if (!currentLectures) return [];
+          return currentLectures.filter((_, i) => i !== index);
+      });
+      
+      const updatedClassSnap = await get(ref(db, `classes/${timetableClass.id}`));
+      if(updatedClassSnap.exists()) {
+         const tt = updatedClassSnap.val().timetables?.[timetableSemester] || {};
+         setTimetable(tt);
+      }
     } catch(err) { alert("Failed to remove lecture."); }
   };
 
@@ -335,20 +369,32 @@ export default function HODDashboard() {
   const handleAddHoliday = async () => {
     if (!holidayDate || !holidayReason) return alert("Enter date and reason.");
     try {
-      const existingHolidays = timetableClass.holidays || {};
-      existingHolidays[holidayDate] = holidayReason;
-      await update(ref(db, `classes/${timetableClass.id}`), { holidays: existingHolidays });
-      setTimetableClass({...timetableClass, holidays: existingHolidays}); setHolidayDate(""); setHolidayReason("");
+      const holidaysRef = ref(db, `classes/${timetableClass.id}/holidays`);
+      await runTransaction(holidaysRef, (currentHolidays) => {
+          const h = currentHolidays || {};
+          h[holidayDate] = holidayReason;
+          return h;
+      });
+      
+      const updatedClassSnap = await get(ref(db, `classes/${timetableClass.id}`));
+      if(updatedClassSnap.exists()) setTimetableClass(updatedClassSnap.val());
+      
+      setHolidayDate(""); setHolidayReason("");
       alert("Holiday declared successfully!");
     } catch (err) { alert("Failed to add holiday."); }
   };
 
   const handleRemoveHoliday = async (date) => {
     try {
-      const existingHolidays = {...timetableClass.holidays};
-      delete existingHolidays[date];
-      await update(ref(db, `classes/${timetableClass.id}`), { holidays: existingHolidays });
-      setTimetableClass({...timetableClass, holidays: existingHolidays});
+      const holidaysRef = ref(db, `classes/${timetableClass.id}/holidays`);
+      await runTransaction(holidaysRef, (currentHolidays) => {
+          if(!currentHolidays) return null;
+          delete currentHolidays[date];
+          return currentHolidays;
+      });
+      
+      const updatedClassSnap = await get(ref(db, `classes/${timetableClass.id}`));
+      if(updatedClassSnap.exists()) setTimetableClass(updatedClassSnap.val());
     } catch (err) { alert("Failed to remove."); }
   };
 
@@ -632,7 +678,6 @@ export default function HODDashboard() {
     XLSX.utils.book_append_sheet(wb, ws, "Marks"); saveExcelFile(wb, `${myCollegeCode}_${subject.name}_Marks.xlsx`);
   };
 
-
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900"><h2 className="text-3xl font-bold text-[#0b3b60] animate-pulse">Loading Portal...</h2></div>;
 
   return (
@@ -718,7 +763,6 @@ export default function HODDashboard() {
               ) : (
                 <div className="space-y-8">
                   {semesters.map(sem => {
-                    // Find all subjects belonging to this semester that have at least one user in archivedBy
                     const archivedSubjectsInSem = subjectsList.filter(sub => 
                       sub.semesterId === sem.id && sub.archivedBy && Object.keys(sub.archivedBy).length > 0
                     );
@@ -756,7 +800,6 @@ export default function HODDashboard() {
                                   ))}
                                 </div>
                                 
-                                {/* PERMANENT DELETE BUTTON */}
                                 <div className="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700 text-center">
                                   <button 
                                     onClick={() => handleDeleteArchivedSubject(sub.id, sub.name)} 
@@ -772,7 +815,6 @@ export default function HODDashboard() {
                       </div>
                     );
                   })}
-                  {/* Fallback if no subjects are archived across all semesters */}
                   {semesters.every(sem => subjectsList.filter(sub => sub.semesterId === sem.id && sub.archivedBy && Object.keys(sub.archivedBy).length > 0).length === 0) && (
                      <div className="text-center text-gray-500 py-10 flex flex-col items-center">
                         <span className="text-4xl mb-3 opacity-50">✨</span>
@@ -815,20 +857,58 @@ export default function HODDashboard() {
           <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="bg-white dark:bg-gray-800 p-6 md:p-8 rounded-[2rem] shadow-sm border border-gray-100 dark:border-gray-700">
             <h3 className="text-xl font-black mb-6 text-[#0b3b60] dark:text-blue-400">Semester Setup</h3>
             <form onSubmit={handleCreateSemester} className="space-y-5">
-              <div>
-                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2 uppercase tracking-wide">Semester Name</label>
-                <input type="text" placeholder="e.g., Semester 2 (2027)" required value={semName} onChange={(e) => setSemName(e.target.value)} className="w-full p-4 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-gray-900 dark:text-white focus:ring-2 focus:ring-[#0b3b60] outline-none transition" />
+              
+              {/* NEW: UPDATE EXISTING SEMESTER DROPDOWN */}
+              <div className="bg-blue-50 dark:bg-blue-900/10 p-4 rounded-xl border border-blue-100 dark:border-blue-900/30">
+                 <label className="block text-sm font-bold text-blue-800 dark:text-blue-300 mb-2 uppercase tracking-wide">1. Select Action</label>
+                 <select 
+                   value={updateSemesterId} 
+                   onChange={(e) => {
+                      setUpdateSemesterId(e.target.value);
+                      if(e.target.value !== "new" && e.target.value !== "") {
+                         const s = semesters.find(sem => sem.id === e.target.value);
+                         if(s) setSemName(s.name);
+                      } else {
+                         setSemName("");
+                      }
+                   }} 
+                   className="w-full p-4 border border-blue-200 dark:border-blue-800 rounded-xl bg-white dark:bg-gray-900 text-gray-900 dark:text-white font-bold outline-none focus:ring-2 focus:ring-[#0b3b60] transition"
+                 >
+                   <option value="new">➕ Create a New Semester</option>
+                   <optgroup label="Update Existing Semesters">
+                     {semesters.map(sem => <option key={sem.id} value={sem.id}>✏️ Add Students to: {sem.name}</option>)}
+                   </optgroup>
+                 </select>
               </div>
+
               <div>
-                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2 uppercase tracking-wide">Quick Clone</label>
-                <select value={importSemesterId} onChange={(e) => handleImportStudents(e.target.value)} className="w-full p-4 border border-blue-200 dark:border-blue-800 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-blue-800 dark:text-blue-300 font-bold outline-none focus:ring-2 focus:ring-[#0b3b60] transition">
-                  <option value="">-- Clone Students from a Previous Semester --</option>
-                  {semesters.map(sem => <option key={sem.id} value={sem.id}>Clone from {sem.name}</option>)}
-                </select>
+                <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2 uppercase tracking-wide">
+                   {updateSemesterId === "new" ? "New Semester Name" : "Selected Semester Name"}
+                </label>
+                <input 
+                  type="text" 
+                  placeholder="e.g., Semester 2 (2027)" 
+                  required 
+                  value={semName} 
+                  onChange={(e) => setSemName(e.target.value)} 
+                  disabled={updateSemesterId !== "new"} 
+                  className={`w-full p-4 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl text-gray-900 dark:text-white focus:ring-2 focus:ring-[#0b3b60] outline-none transition ${updateSemesterId !== "new" ? "opacity-60 cursor-not-allowed font-bold" : ""}`} 
+                />
               </div>
+
+              {updateSemesterId === "new" && (
+                <div>
+                  <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 mb-2 uppercase tracking-wide">Quick Clone</label>
+                  <select value={importSemesterId} onChange={(e) => handleImportStudents(e.target.value)} className="w-full p-4 border border-blue-200 dark:border-blue-800 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-blue-800 dark:text-blue-300 font-bold outline-none focus:ring-2 focus:ring-[#0b3b60] transition">
+                    <option value="">-- Clone Students from a Previous Semester --</option>
+                    {semesters.map(sem => <option key={sem.id} value={sem.id}>Clone from {sem.name}</option>)}
+                  </select>
+                </div>
+              )}
+
               <div>
                 <div className="flex justify-between items-center mb-2">
-                  <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 uppercase tracking-wide">Select Students</label>
+                  <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 uppercase tracking-wide">Select Students to Add</label>
                   <span className="text-xs font-bold text-blue-500 bg-blue-50 dark:bg-blue-900/30 px-2 py-1 rounded">
                     {selectedStudents.length} Selected / {students.length} Total
                   </span>
@@ -854,7 +934,9 @@ export default function HODDashboard() {
                   ))}
                 </div>
               </div>
-              <button type="submit" className="w-full md:w-auto bg-[#0b3b60] hover:bg-blue-800 text-white px-8 py-4 rounded-xl font-bold shadow-md transition-transform active:scale-95">Create Semester</button>
+              <button type="submit" className="w-full md:w-auto bg-[#0b3b60] hover:bg-blue-800 text-white px-8 py-4 rounded-xl font-bold shadow-md transition-transform active:scale-95">
+                {updateSemesterId === "new" ? "Create Semester" : "Update Semester & Add Students"}
+              </button>
             </form>
           </motion.div>
         )}
