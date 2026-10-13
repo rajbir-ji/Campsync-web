@@ -62,7 +62,7 @@ export default function HODDashboard() {
   const [holidayDate, setHolidayDate] = useState("");
   const [holidayReason, setHolidayReason] = useState("");
   
-  // NEW: CUSTOM DYNAMIC DAYS
+  // CUSTOM DYNAMIC DAYS
   const [customDayInput, setCustomDayInput] = useState("");
   const [selectedDay, setSelectedDay] = useState("");
 
@@ -140,6 +140,12 @@ export default function HODDashboard() {
     setLoading(false);
   };
 
+  const getStudentCount = (studentIds) => {
+    if (!studentIds) return 0;
+    if (Array.isArray(studentIds)) return studentIds.length;
+    return Object.keys(studentIds).length;
+  };
+
   const handleImportStudents = (semId) => {
     setImportSemesterId(semId);
     if (!semId) return setSelectedStudents([]);
@@ -149,21 +155,66 @@ export default function HODDashboard() {
     } else setSelectedStudents([]);
   };
 
+  // FIXED: Auto-Update & Merge Existing Semesters
   const handleCreateSemester = async (e) => {
     e.preventDefault();
     if (selectedStudents.length === 0) return alert("Select at least one student.");
-    await set(push(ref(db, "semesters")), { name: semName, studentIds: selectedStudents, collegeCode: myCollegeCode });
+    
+    const existingSem = semesters.find(s => s.name.toLowerCase().trim() === semName.toLowerCase().trim());
+    
+    if (existingSem) {
+       let existingSet = new Set();
+       if (existingSem.studentIds) {
+          if (Array.isArray(existingSem.studentIds)) {
+             existingSem.studentIds.forEach(id => existingSet.add(id));
+          } else {
+             Object.entries(existingSem.studentIds).forEach(([k, v]) => {
+                if (typeof v === "string") existingSet.add(v);
+                else if (v === true) existingSet.add(k);
+             });
+          }
+       }
+       selectedStudents.forEach(id => existingSet.add(id));
+       const mergedIds = Array.from(existingSet);
+       
+       await update(ref(db, `semesters/${existingSem.id}`), { studentIds: mergedIds });
+       alert(`Updated '${existingSem.name}'! Total students in this semester is now ${mergedIds.length}.`);
+    } else {
+       await set(push(ref(db, "semesters")), { name: semName.trim(), studentIds: selectedStudents, collegeCode: myCollegeCode });
+       alert("Semester Created successfully!");
+    }
+    
     setSemName(""); setSelectedStudents([]); setImportSemesterId(""); setFormStudentSearch("");
-    fetchAllIsolatedData(myCollegeCode); alert("Semester Created successfully!");
+    fetchAllIsolatedData(myCollegeCode); 
   };
 
+  // FIXED: Auto-Update & Merge Existing Classes
   const handleCreateClass = async (e) => {
     e.preventDefault();
     if (selectedSemesters.length === 0) return alert("Select at least one semester.");
     if (!selectedIncharge) return alert("Select an incharge teacher.");
-    await set(push(ref(db, "classes")), { name: className, semesterIds: selectedSemesters, inchargeId: selectedIncharge, collegeCode: myCollegeCode });
+    
+    const existingClass = classes.find(c => c.name.toLowerCase().trim() === className.toLowerCase().trim());
+    
+    if (existingClass) {
+       let existingSemSet = new Set();
+       if (existingClass.semesterIds) {
+           if (Array.isArray(existingClass.semesterIds)) existingClass.semesterIds.forEach(id => existingSemSet.add(id));
+           else Object.values(existingClass.semesterIds).forEach(id => existingSemSet.add(id));
+       }
+       selectedSemesters.forEach(id => existingSemSet.add(id));
+       
+       await update(ref(db, `classes/${existingClass.id}`), {
+          semesterIds: Array.from(existingSemSet),
+          inchargeId: selectedIncharge 
+       });
+       alert(`Updated Class '${existingClass.name}' with new semesters and/or incharge!`);
+    } else {
+       await set(push(ref(db, "classes")), { name: className.trim(), semesterIds: selectedSemesters, inchargeId: selectedIncharge, collegeCode: myCollegeCode });
+       alert("Class Created successfully!");
+    }
     setClassName(""); setSelectedSemesters([]); setSelectedIncharge(""); setInchargeSearchTerm("");
-    fetchAllIsolatedData(myCollegeCode); alert("Class Created successfully!");
+    fetchAllIsolatedData(myCollegeCode); 
   };
 
   const handleCreateSubject = async (e) => {
@@ -205,8 +256,6 @@ export default function HODDashboard() {
     setTimetableSemester(semId);
     const tt = timetableClass.timetables?.[semId] || {};
     setTimetable(tt);
-    
-    // Auto-select the first day if available, otherwise clear
     const existingDays = Object.keys(tt);
     setSelectedDay(existingDays.length > 0 ? existingDays[0] : "");
   };
@@ -780,7 +829,9 @@ export default function HODDashboard() {
               <div>
                 <div className="flex justify-between items-center mb-2">
                   <label className="block text-sm font-bold text-gray-700 dark:text-gray-300 uppercase tracking-wide">Select Students</label>
-                  <span className="text-xs font-bold text-blue-500 bg-blue-50 dark:bg-blue-900/30 px-2 py-1 rounded">{students.length} Total</span>
+                  <span className="text-xs font-bold text-blue-500 bg-blue-50 dark:bg-blue-900/30 px-2 py-1 rounded">
+                    {selectedStudents.length} Selected / {students.length} Total
+                  </span>
                 </div>
 
                 <input
@@ -846,7 +897,7 @@ export default function HODDashboard() {
                   {semesters.length === 0 ? <p className="text-sm text-gray-500 italic">Create a semester first.</p> : semesters.map(sem => (
                     <label key={sem.id} className="flex items-center space-x-3 mb-3 cursor-pointer p-2 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition">
                       <input type="checkbox" checked={selectedSemesters.includes(sem.id)} onChange={() => toggleSelection(sem.id, selectedSemesters, setSelectedSemesters)} className="w-5 h-5 text-[#0b3b60] rounded" />
-                      <span className="text-gray-800 dark:text-gray-200 font-medium">{sem.name} <span className="text-gray-500 text-sm ml-1">({sem.studentIds ? Object.keys(sem.studentIds).length : 0} students)</span></span>
+                      <span className="text-gray-800 dark:text-gray-200 font-medium">{sem.name} <span className="text-gray-500 text-sm ml-1">({getStudentCount(sem.studentIds)} students)</span></span>
                     </label>
                   ))}
                 </div>
@@ -955,7 +1006,7 @@ export default function HODDashboard() {
                     
                     <div className="bg-white dark:bg-gray-800 p-5 rounded-xl shadow-sm border border-blue-100 dark:border-blue-900/30 mb-6 flex flex-col gap-5">
                       
-                      {/* NEW: CUSTOM DYNAMIC DAYS */}
+                      {/* CUSTOM DYNAMIC DAYS */}
                       <div className="flex flex-col sm:flex-row gap-4 items-end">
                          <div className="flex-1 w-full">
                            <label className="block text-xs font-bold text-gray-500 mb-1 uppercase tracking-wider">Create / Select Day</label>
@@ -987,7 +1038,7 @@ export default function HODDashboard() {
 
                       <div className="flex flex-col sm:flex-row gap-4">
                         <div className="flex-1">
-                          {/* NEW: CUSTOMIZED LECTURE INPUT */}
+                          {/* CUSTOMIZED LECTURE INPUT */}
                           <label className="block text-xs font-bold text-gray-500 mb-1 uppercase tracking-wider">Lecture Period</label>
                           <input type="text" placeholder="e.g., 1st Lec, Lab 2, Seminar" value={newLecture.lecNumber} onChange={e => setNewLecture({...newLecture, lecNumber: e.target.value})} className="w-full p-3 bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-xl outline-none focus:ring-2 focus:ring-[#0b3b60] dark:text-white"/>
                         </div>
